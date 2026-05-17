@@ -1,0 +1,223 @@
+{
+  "document_id": "doc_0001",
+  "document_type": "single_invoice",
+  "invoice_count": 1,
+  "invoices": [
+    {
+      "invoice_id": "doc_0001_inv1",
+      "invoice_number": "oice",
+      "seller_name": "TO:",
+      "buyer_name": "Lopez, Lowery and Coffey Reynolds-Andrade",
+      "issue_date": "2022-02-10",
+      "currency": "CHF",
+      "subtotal": 1163367.95,
+      "tax_amount": 130944.21,
+      "discount_amount": 105812.74,
+      "total_amount": 1188499.42,
+      "payment_terms_days": 90,
+      "page_start": 0,
+      "page_end": 0,
+      "line_items": [
+        {
+          "description": "Office Supplies",
+          "quantity": 10.0,
+          "unit_price": 3034.98,
+          "tax_amount": 0.0,
+          "discount_amount": 1517.49,
+          "line_total": 28832.31
+        },
+        {
+          "description": "Accounting Services",
+          "quantity": 3.0,
+          "unit_price": 231.49,
+          "tax_amount": 138.89,
+          "discount_amount": 0.0,
+          "line_total": 833.36
+        },
+        {
+          "description": "Mobile App Development",
+          "quantity": 50.0,
+          "unit_price": 3437.42,
+          "tax_amount": 13749.68,
+          "discount_amount": 0.0,
+          "line_total": 185620.68
+        },
+        {
+          "description": "API Integration\n(ref: td-3976)",
+          "quantity": 5.0,
+          "unit_price": 3119.55,
+          "tax_amount": 0.0,
+          "discount_amount": 2339.66,
+          "line_total": 13258.09
+        },
+        {
+          "description": "Accounting Services",
+          "quantity": 3.0,
+          "unit_price": 3337.8,
+          "tax_amount": 1426.91,
+          "discount_amount": 500.67,
+          "line_total": 10939.64
+        },
+        {
+          "description": "IT Support",
+          "quantity": 1.0,
+          "unit_price": 967.28,
+          "tax_amount": 164.44,
+          "discount_amount": 145.09,
+          "line_total": 986.63
+        },
+        {
+          "description": "Office Supplies",
+          "quantity": 100.0,
+          "unit_price": 2849.84,
+          "tax_amount": 51297.12,
+          "discount_amount": 28498.4,
+          "line_total": 307782.72
+        },
+        {
+          "description": "Video Production\n(ref: IQ-2170)",
+          "quantity": 3.0,
+          "unit_price": 1058.81,
+          "tax_amount": 452.64,
+          "discount_amount": 158.82,
+          "line_total": 3470.25
+        },
+        {
+          "description": "Database Optimization",
+          "quantity": 2.0,
+          "unit_price": 2560.76,
+          "tax_amount": 217.66,
+          "discount_amount": 768.23,
+          "line_total": 4570.95
+        },
+        {
+          "description": "Cloud Hosting",
+          "quantity": 100.0,
+          "unit_price": 1682.59,
+          "tax_amount": 11441.61,
+          "discount_amount": 25238.85,
+          "line_total": 154461.76
+        },
+        {
+          "description": "Training Materials",
+          "quantity": 2.0,
+          "unit_price": 745.3,
+          "tax_amount": 0.0,
+          "discount_amount": 0.0,
+          "line_total": 1490.6
+        },
+        {
+          "description": "Security Audit",
+          "quantity": 1.0,
+          "unit_price": 2282.53,
+          "tax_amount": 155.21,
+          "discount_amount": 342.38,
+          "line_total": 2095.36
+        },
+        {
+          "description": "IT Support",
+          "quantity": 10.0,
+          "unit_price": 1227.48,
+          "tax_amount": 0.0,
+          "discount_amount": 2454.96,
+          "line_total": 9819.84
+        },
+        {
+          "description": "Translation Services",
+          "quantity": 1.0,
+          "unit_price": 3894.32,
+          "tax_amount": 311.55,
+          "discount_amount": 0.0,
+          "line_total": 4205.87
+        },
+        {
+          "description": "Photography Services",
+          "quantity": 50.0,
+          "unit_price": 2328.1,
+          "tax_amount": 7449.92,
+          "discount_amount": 23281.0,
+          "line_total": 100573.92
+        },
+        {
+          "description": "Design Services",
+          "quantity": 20.0,
+          "unit_price": 3341.21,
+          "tax_amount": 8018.9,
+          "discount_amount": 13364.84,
+          "line_total": 61478.26
+        },
+        {
+          "description": "Accounting Services",
+          "quantity": 50.0,
+          "unit_price": 2139.44,
+          "tax_amount": 22464.12,
+          "discount_amount": 0.0,
+          "line_total": 129436.12
+        },
+        {
+          "description": "Office Supplies",
+          "quantity": 20.0,
+          "unit_price": 1303.37,
+          "tax_amount": 1668.31,
+          "discount_amount": 5213.48,
+          "line_total": 22522.23
+        },
+        {
+          "description": "Social Media Management",
+          "quantity": 50.0,
+          "unit_price": 2428.14,
+          "tax_amount": 9712.56,
+          "discount_amount": 0.0,
+          "line_total": 131119.56
+        },
+        {
+          "description": "Database Optimization\n(ref: mG-1607)",
+          "quantity": 3.0,
+          "unit_price": 1180.12,
+          "tax_amount": 531.05,
+          "discount_amount": 0.0,
+          "line_total": 4071.41
+        },
+        {
+          "description": "Accounting Services",
+          "quantity": 1.0,
+          "unit_price": 762.64,
+          "tax_amount": 129.65,
+          "discount_amount": 114.4,
+          "line_total": 777.89
+        },
+        {
+          "description": "Marketing Campaign",
+          "quantity": 1.0,
+          "unit_price": 2080.19,
+          "tax_amount": 280.83,
+          "discount_amount": 208.02,
+          "line_total": 2153.0
+        },
+        {
+          "description": "Database Optimization",
+          "quantity": 2.0,
+          "unit_price": 4166.13,
+          "tax_amount": 1333.16,
+          "discount_amount": 1666.45,
+          "line_total": 7998.97
+        }
+      ],
+      "validation_errors": [],
+      "confidence_scores": {
+        "invoice_number": 0.85,
+        "issue_date": 0.8,
+        "currency": 0.2,
+        "payment_terms": 0.85,
+        "seller_name": 0.75,
+        "buyer_name": 0.75,
+        "subtotal": 0.7,
+        "tax_amount": 0.7,
+        "total_amount": 0.4
+      }
+    }
+  ],
+  "processing_notes": [
+    "Detected 1 invoice boundary(ies) across 2 page(s)"
+  ]
+}

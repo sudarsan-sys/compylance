@@ -8,9 +8,16 @@ import sys
 import json
 import argparse
 from pathlib import Path
+import pdfplumber
 
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 from extractor import process_document, result_to_dict
+
+with pdfplumber.open(sys.argv[1]) as pdf:
+    for i, page in enumerate(pdf.pages):
+        print(f"\n========= PAGE {i} RAW TEXT =========")
+        print(repr(page.extract_text()))
+        print("=====================================")
 
 
 def main():

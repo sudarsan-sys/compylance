@@ -67,8 +67,10 @@ class DocumentResult:
 # ─────────────────────────────────────────────
 
 INVOICE_NUMBER_PATTERNS = [
-    r'(?:invoice|inv|bill|receipt|si)[.\s#:_/-]*([A-Z0-9]{4,20})',
-    r'(?:invoice|inv)\s*(?:no|number|num|#)[.:\s]*([A-Z0-9/_-]{4,25})',
+    # Most specific first — label + colon/hash then token
+    r'invoice\s*#\s*[:\s]*([A-Z]{2,5}[-/]\d{4}[-/]\d+)',
+    r'invoice\s*(?:no|number|num|#)[.:\s]*([A-Z0-9/_-]{4,25})',
+    r'(?:inv|bill|si|rec)[.\s#:_/-]+([A-Z0-9]{2,5}[-/]\d{4}[-/]\d+)',
     r'#\s*([A-Z]{2,5}[-/]?\d{4,10})',
     r'\b(INV[-/]?\d{4,10})\b',
     r'\b(INVOICE[-/]?\d{4,10})\b',
@@ -191,7 +193,19 @@ def detect_currency(text: str) -> Tuple[str, float]:
     if not scores:
         return "USD", 0.3
     best = max(scores, key=scores.get)
+
+    # Base confidence scaled by hit count (5 hits = 1.0)
     confidence = min(1.0, scores[best] / 5)
+
+    # Boost: if the symbol appears many times (e.g. Fr on every line item)
+    # it is almost certainly correct — floor confidence at 0.75
+    if scores[best] >= 10:
+        confidence = max(confidence, 0.75)
+
+    # Boost: if the currency code itself appears explicitly in text
+    if re.search(rf'\b{best}\b', text, re.IGNORECASE):
+        confidence = max(confidence, 0.80)
+
     return best, confidence
 
 
@@ -262,32 +276,124 @@ def extract_payment_terms(text: str) -> Tuple[int, float]:
 
 
 def extract_party_names(text: str) -> Tuple[str, str, float, float]:
-    """Extract seller (from) and buyer (to/bill to) names."""
+    """
+    Extract seller and buyer names.
+    Handles two-column address layout where pdfplumber produces:
+        'FROM: TO:'
+        'Lopez, Lowery and Coffey Reynolds-Andrade'
+    """
     seller, buyer = "", ""
     s_conf, b_conf = 0.0, 0.0
 
-    # Seller: text after FROM: or company header
-    m = re.search(r'(?:from|seller|vendor)[:\s]+([^\n]{3,50})', text, re.IGNORECASE)
-    if m:
-        seller = m.group(1).strip()
-        s_conf = 0.75
+    lines = text.split('\n')
 
-    # Buyer: text after TO: or BILL TO:
-    m2 = re.search(r'(?:bill\s+to|ship\s+to|to|buyer|customer)[:\s]+([^\n]{3,50})', text, re.IGNORECASE)
-    if m2:
-        buyer = m2.group(1).strip()
-        b_conf = 0.75
+    # ── Strategy 1: two-column layout ──
+    # pdfplumber merges both labels into one line: "FROM: TO:"
+    # and both names into the next line: "SellerName BuyerName"
+    for i, line in enumerate(lines):
+        stripped = line.strip()
 
-    # Fallback: first two all-caps company-like lines
-    lines = [l.strip() for l in text.split('\n') if len(l.strip()) > 3]
-    if not seller and lines:
-        seller = lines[0]
-        s_conf = 0.4
-    if not buyer and len(lines) > 1:
-        buyer = lines[1]
-        b_conf = 0.3
+        # Detect the combined label line
+        if re.search(r'from\s*:', stripped, re.IGNORECASE) and \
+           re.search(r'\bto\s*:', stripped, re.IGNORECASE):
 
-    return seller[:80], buyer[:80], s_conf, b_conf
+            # Find where "TO:" starts in this label line
+            to_match = re.search(r'\bto\s*:', stripped, re.IGNORECASE)
+            to_col = to_match.start()
+
+            # The next non-empty line contains both names side by side
+            for j in range(i + 1, min(i + 4, len(lines))):
+                name_line = lines[j]
+                if len(name_line.strip()) < 3:
+                    continue
+
+                # Split the name line at the same column position as "TO:"
+                # Use the column of "TO:" in the label line as the split point
+                # But name_line may be shorter, so find the split by proportion
+                # More reliable: find where the second name starts
+                # by detecting a capital letter after a space past the midpoint
+                # of the label line's TO: position
+
+                # Method: use the character index of "TO:" in label line
+                # as the approximate column to split the name line
+                split_col = to_col
+
+                if split_col < len(name_line):
+                    left  = name_line[:split_col].strip()
+                    right = name_line[split_col:].strip()
+                else:
+                    # Name line is shorter than label line — split at last word boundary
+                    # Find the last run of words that could be a second company name
+                    # by looking for a capital letter after a gap
+                    parts = re.split(r'\s{2,}', name_line.strip())
+                    if len(parts) >= 2:
+                        left  = parts[0].strip()
+                        right = ' '.join(parts[1:]).strip()
+                    else:
+                        # Single run — try splitting on known seller name
+                        left  = name_line.strip()
+                        right = ""
+
+                if left:
+                    seller = left[:80]
+                    s_conf = 0.90
+                if right:
+                    buyer = right[:80]
+                    b_conf = 0.90
+                break
+            break
+
+    # ── Strategy 2: single-column layout ──
+    # "FROM:" on its own line, name on next line
+    if not seller:
+        for i, line in enumerate(lines):
+            if re.match(r'from\s*:\s*$', line.strip(), re.IGNORECASE):
+                for j in range(i + 1, min(i + 4, len(lines))):
+                    candidate = lines[j].strip()
+                    if len(candidate) > 2:
+                        seller = candidate[:80]
+                        s_conf = 0.85
+                        break
+                break
+            m = re.match(r'from\s*:\s*([A-Za-z].+)', line.strip(), re.IGNORECASE)
+            if m:
+                seller = m.group(1).strip()[:80]
+                s_conf = 0.85
+                break
+
+    if not buyer:
+        for i, line in enumerate(lines):
+            if re.match(r'(?:bill\s+to|(?<!\w)to)\s*:\s*$', line.strip(), re.IGNORECASE):
+                for j in range(i + 1, min(i + 4, len(lines))):
+                    candidate = lines[j].strip()
+                    if len(candidate) > 2:
+                        buyer = candidate[:80]
+                        b_conf = 0.85
+                        break
+                break
+            m = re.match(r'(?:bill\s+to|(?<!\w)to)\s*:\s*([A-Za-z].+)',
+                         line.strip(), re.IGNORECASE)
+            if m:
+                buyer = m.group(1).strip()[:80]
+                b_conf = 0.85
+                break
+
+    # ── Strategy 3: company header at top of document ──
+    # "LOPEZ, LOWERY AND COFFEY" appears as first line before invoice fields
+    if not seller:
+        for line in lines:
+            candidate = line.strip()
+            if (len(candidate) > 3
+                    and re.search(r'[A-Za-z]{3,}', candidate)
+                    and not re.match(
+                        r'^(invoice|date|currency|payment|from|to|bill|'
+                        r'description|qty|unit|tax|discount|total|subtotal)',
+                        candidate, re.IGNORECASE)):
+                seller = candidate[:80]
+                s_conf = 0.5
+                break
+
+    return seller, buyer, s_conf, b_conf
 
 
 # ─────────────────────────────────────────────

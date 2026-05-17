@@ -1,0 +1,24 @@
+{
+  "n_documents": 400,
+  "n_errors": 0,
+  "avg_processing_time_s": 0.633,
+  "document_type_accuracy": 0.81,
+  "invoice_count_mae": 0.325,
+  "field_extraction_scores": {
+    "invoice_number": 0.3807,
+    "issue_date": 0.9505,
+    "currency": 0.8716,
+    "subtotal": 0.5369,
+    "tax_amount": 0.5492,
+    "total_amount": 0.4185,
+    "payment_terms_days": 0.9541
+  },
+  "overall_field_score": 0.6659,
+  "validation_error_detection": {
+    "precision": 0.3783,
+    "recall": 0.8718,
+    "f1": 0.5276
+  },
+  "line_item_count_mae": 7.0459,
+  "processing_errors": []
+}
