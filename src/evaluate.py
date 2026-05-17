@@ -12,11 +12,13 @@ from pathlib import Path
 from collections import defaultdict
 from typing import List, Dict, Any, Tuple
 
-sys.path.insert(0, str(Path(__file__).parent))
+src_dir = Path(__file__).resolve().parent
+if str(src_dir) not in sys.path:
+    sys.path.insert(0, str(src_dir))
 from extractor import process_document, result_to_dict
 
 
-BASE_DIR = Path("/home/claude/invoice_system")
+BASE_DIR = Path(__file__).resolve().parent.parent
 
 
 def load_annotations(path: Path) -> Dict[str, dict]:

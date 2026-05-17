@@ -1,0 +1,7 @@
+pdfplumber
+pypdf 
+reportlab 
+Pillow 
+numpy 
+scikit-learn 
+faker
