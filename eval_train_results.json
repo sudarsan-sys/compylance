@@ -1,7 +1,7 @@
 {
   "n_documents": 400,
   "n_errors": 0,
-  "avg_processing_time_s": 0.496,
+  "avg_processing_time_s": 0.493,
   "document_type_accuracy": 0.905,
   "invoice_count_mae": 0.325,
   "field_extraction_scores": {
