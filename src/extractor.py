@@ -2,6 +2,14 @@
 Invoice Extraction Pipeline
 Core system for: invoice detection, field extraction, table parsing, validation.
 Minimal LLM usage — primary reliance on pdfplumber, regex heuristics, layout analysis.
+
+Fixes applied:
+  Fix 1 — Invoice number regex: tightened patterns to avoid capturing partial words
+  Fix 2 — extract_party_names: three-strategy parser handles two-column PDF layouts
+           where pdfplumber merges "FROM: TO:" onto one line and both company names
+           onto the next line as a single concatenated string
+  Fix 3 — detect_currency: confidence boost when symbol appears 10+ times or
+           currency code appears explicitly in text
 """
 
 import re
@@ -16,6 +24,7 @@ import pdfplumber
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
 
 # ─────────────────────────────────────────────
 # Data structures
@@ -66,8 +75,8 @@ class DocumentResult:
 # Regex patterns
 # ─────────────────────────────────────────────
 
+# FIX 1: tightened — most specific patterns first, require structured token shape
 INVOICE_NUMBER_PATTERNS = [
-    # Most specific first — label + colon/hash then token
     r'invoice\s*#\s*[:\s]*([A-Z]{2,5}[-/]\d{4}[-/]\d+)',
     r'invoice\s*(?:no|number|num|#)[.:\s]*([A-Z0-9/_-]{4,25})',
     r'(?:inv|bill|si|rec)[.\s#:_/-]+([A-Z0-9]{2,5}[-/]\d{4}[-/]\d+)',
@@ -77,8 +86,8 @@ INVOICE_NUMBER_PATTERNS = [
 ]
 
 DATE_PATTERNS = [
-    r'\b(\d{4}[-/]\d{2}[-/]\d{2})\b',               # ISO: 2024-01-15
-    r'\b(\d{2}[-/]\d{2}[-/]\d{4})\b',               # EU: 15/01/2024
+    r'\b(\d{4}[-/]\d{2}[-/]\d{2})\b',
+    r'\b(\d{2}[-/]\d{2}[-/]\d{4})\b',
     r'\b(\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{4})\b',
     r'\b((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2},?\s+\d{4})\b',
 ]
@@ -130,21 +139,18 @@ DISCOUNT_LABELS = [
     r'credit[:\s]',
 ]
 
-# Keywords that signal invoice pages
 INVOICE_SIGNALS = [
     'invoice', 'bill to', 'ship to', 'payment terms', 'invoice date',
     'invoice number', 'invoice no', 'due date', 'subtotal', 'amount due',
     'tax invoice', 'commercial invoice', 'proforma invoice',
 ]
 
-# Keywords that signal non-invoice pages
 NON_INVOICE_SIGNALS = [
     'terms and conditions', 'terms of service', 'privacy policy',
     'shipping notice', 'packing slip', 'company profile', 'about us',
     'user agreement', 'refund policy', 'frequently asked questions',
 ]
 
-# Separator markers between invoices (in multi-invoice docs)
 INVOICE_BREAK_SIGNALS = [
     r'invoice\s+#?\s*[A-Z0-9]',
     r'bill\s+to\s*:',
@@ -162,7 +168,6 @@ def clean_amount(s: str) -> Optional[float]:
     if not s:
         return None
     s = s.replace(',', '').strip()
-    # Remove currency symbols
     s = re.sub(r'[^\d.\-]', '', s)
     try:
         return float(s)
@@ -182,7 +187,11 @@ def extract_amounts_near_label(text: str, label_patterns: List[str]) -> Optional
 
 
 def detect_currency(text: str) -> Tuple[str, float]:
-    """Return (currency_code, confidence)."""
+    """
+    Return (currency_code, confidence).
+    FIX 3: confidence boosted when symbol appears 10+ times or
+    currency code appears explicitly in document text.
+    """
     scores = {}
     for cur, patterns in CURRENCY_PATTERNS.items():
         score = 0
@@ -190,19 +199,20 @@ def detect_currency(text: str) -> Tuple[str, float]:
             score += len(re.findall(pat, text, re.IGNORECASE))
         if score > 0:
             scores[cur] = score
+
     if not scores:
         return "USD", 0.3
+
     best = max(scores, key=scores.get)
 
-    # Base confidence scaled by hit count (5 hits = 1.0)
+    # Base confidence: 5 hits → 1.0
     confidence = min(1.0, scores[best] / 5)
 
-    # Boost: if the symbol appears many times (e.g. Fr on every line item)
-    # it is almost certainly correct — floor confidence at 0.75
+    # Boost: symbol appears on every line item (10+ hits) → almost certainly correct
     if scores[best] >= 10:
         confidence = max(confidence, 0.75)
 
-    # Boost: if the currency code itself appears explicitly in text
+    # Boost: currency code appears explicitly (e.g. "Currency: CHF")
     if re.search(rf'\b{best}\b', text, re.IGNORECASE):
         confidence = max(confidence, 0.80)
 
@@ -227,29 +237,25 @@ def extract_invoice_number(text: str) -> Tuple[str, float]:
 
 
 def extract_date(text: str) -> Tuple[str, float]:
-    # Look near "date" keyword first
     date_ctx = re.search(
-        r'(?:invoice\s+date|issue\s+date|date)[:\s]+([^\n]{5,30})', text, re.IGNORECASE
+        r'(?:invoice\s+date|issue\s+date|date)[:\s]+([^\n]{5,30})',
+        text, re.IGNORECASE
     )
     search_text = date_ctx.group(1) if date_ctx else text
     for pat in DATE_PATTERNS:
         m = re.search(pat, search_text, re.IGNORECASE)
         if m:
             raw = m.group(1)
-            # Normalize to YYYY-MM-DD
             normalized = normalize_date(raw)
             return normalized, 0.8 if date_ctx else 0.6
     return "", 0.0
 
 
 def normalize_date(raw: str) -> str:
-    import re
     from datetime import datetime
     raw = raw.strip()
-    # Already ISO
     if re.match(r'\d{4}-\d{2}-\d{2}', raw):
         return raw
-    # DD/MM/YYYY or MM/DD/YYYY (assume DD/MM for EU style)
     m = re.match(r'(\d{1,2})[/-](\d{1,2})[/-](\d{4})', raw)
     if m:
         d, mo, y = m.group(1), m.group(2), m.group(3)
@@ -257,7 +263,6 @@ def normalize_date(raw: str) -> str:
             return datetime(int(y), int(mo), int(d)).strftime("%Y-%m-%d")
         except Exception:
             pass
-    # Month name formats
     for fmt in ["%d %B %Y", "%d %b %Y", "%B %d, %Y", "%b %d, %Y",
                 "%B %d %Y", "%b %d %Y", "%d %B, %Y"]:
         try:
@@ -277,85 +282,119 @@ def extract_payment_terms(text: str) -> Tuple[int, float]:
 
 def extract_party_names(text: str) -> Tuple[str, str, float, float]:
     """
-    Extract seller and buyer names.
-    Handles two-column address layout where pdfplumber produces:
-        'FROM: TO:'
-        'Lopez, Lowery and Coffey Reynolds-Andrade'
+    Extract seller (FROM) and buyer (TO) company names.
+
+    FIX 2 — Three-strategy parser:
+
+    Strategy 1 — Two-column layout:
+        pdfplumber collapses the two-column address block into:
+            'FROM: TO:'                                   ← label line
+            'Lopez, Lowery and Coffey Reynolds-Andrade'   ← names on one line
+        We use the document header (first line, typically the seller in
+        ALL CAPS) as a word-set anchor to find where the seller name ends
+        and the buyer name begins in that concatenated string.
+
+    Strategy 2 — Single-column layout:
+        FROM: and TO: each appear on their own line with the name on the
+        next line, or on the same line as "FROM: Company Name".
+
+    Strategy 3 — Last resort:
+        Use the first and second meaningful lines of the document.
     """
     seller, buyer = "", ""
     s_conf, b_conf = 0.0, 0.0
 
     lines = text.split('\n')
 
-    # ── Strategy 1: two-column layout ──
-    # pdfplumber merges both labels into one line: "FROM: TO:"
-    # and both names into the next line: "SellerName BuyerName"
+    # ── Strategy 1: two-column layout — "FROM: TO:" on one line ──
     for i, line in enumerate(lines):
         stripped = line.strip()
 
-        # Detect the combined label line
         if re.search(r'from\s*:', stripped, re.IGNORECASE) and \
            re.search(r'\bto\s*:', stripped, re.IGNORECASE):
 
-            # Find where "TO:" starts in this label line
-            to_match = re.search(r'\bto\s*:', stripped, re.IGNORECASE)
-            to_col = to_match.start()
-
-            # The next non-empty line contains both names side by side
+            # Next non-empty line has both names concatenated without a gap:
+            # "Lopez, Lowery and Coffey Reynolds-Andrade"
             for j in range(i + 1, min(i + 4, len(lines))):
-                name_line = lines[j]
-                if len(name_line.strip()) < 3:
+                name_line = lines[j].strip()
+                if len(name_line) < 3:
                     continue
 
-                # Split the name line at the same column position as "TO:"
-                # Use the column of "TO:" in the label line as the split point
-                # But name_line may be shorter, so find the split by proportion
-                # More reliable: find where the second name starts
-                # by detecting a capital letter after a space past the midpoint
-                # of the label line's TO: position
+                # ── Approach A: document header as seller anchor ──
+                # The very first line of the document is usually the seller
+                # company header in ALL CAPS e.g. "LOPEZ, LOWERY AND COFFEY"
+                # Build a set of significant words from it and walk name_line
+                # token by token — stop at the first word not in that set.
+                header_seller = lines[0].strip()
+                header_words = set(
+                    w.lower()
+                    for w in re.split(r'[\s,&.]+', header_seller)
+                    if len(w) > 2
+                )
 
-                # Method: use the character index of "TO:" in label line
-                # as the approximate column to split the name line
-                split_col = to_col
+                if header_words:
+                    tokens = list(re.finditer(r'\S+', name_line))
+                    best_end_pos = 0
 
-                if split_col < len(name_line):
-                    left  = name_line[:split_col].strip()
-                    right = name_line[split_col:].strip()
-                else:
-                    # Name line is shorter than label line — split at last word boundary
-                    # Find the last run of words that could be a second company name
-                    # by looking for a capital letter after a gap
-                    parts = re.split(r'\s{2,}', name_line.strip())
-                    if len(parts) >= 2:
-                        left  = parts[0].strip()
-                        right = ' '.join(parts[1:]).strip()
-                    else:
-                        # Single run — try splitting on known seller name
-                        left  = name_line.strip()
-                        right = ""
+                    for tok in tokens:
+                        word = re.sub(r'[,.]', '', tok.group()).lower()
+                        # Allow small connector words through
+                        if word in ('and', 'or', 'of', 'the', '&'):
+                            best_end_pos = tok.end()
+                            continue
+                        if word in header_words:
+                            best_end_pos = tok.end()
+                        else:
+                            break  # first word not in seller set → buyer starts here
 
-                if left:
-                    seller = left[:80]
-                    s_conf = 0.90
-                if right:
-                    buyer = right[:80]
-                    b_conf = 0.90
+                    if best_end_pos > 0:
+                        seller_candidate = name_line[:best_end_pos].strip()
+                        buyer_candidate  = name_line[best_end_pos:].strip()
+                        if seller_candidate:
+                            seller = seller_candidate[:80]
+                            s_conf = 0.92
+                        if buyer_candidate:
+                            buyer  = buyer_candidate[:80]
+                            b_conf = 0.92
+                        break
+
+                # ── Approach B: split on 2+ consecutive spaces ──
+                parts = re.split(r'\s{2,}', name_line)
+                if len(parts) >= 2:
+                    seller = parts[0].strip()[:80]
+                    buyer  = parts[-1].strip()[:80]
+                    s_conf = 0.88
+                    b_conf = 0.88
+                    break
+
+                # ── Approach C: column-position fallback ──
+                to_match  = re.search(r'\bto\s*:', stripped, re.IGNORECASE)
+                split_col = to_match.start() if to_match else len(name_line) // 2
+                seller = name_line[:split_col].strip()[:80]
+                buyer  = name_line[split_col:].strip()[:80]
+                s_conf = 0.70
+                b_conf = 0.70
                 break
-            break
+            break  # found the FROM:/TO: label line — stop outer loop
 
     # ── Strategy 2: single-column layout ──
-    # "FROM:" on its own line, name on next line
     if not seller:
         for i, line in enumerate(lines):
-            if re.match(r'from\s*:\s*$', line.strip(), re.IGNORECASE):
+            stripped = line.strip()
+            # Label on its own line
+            if re.match(r'from\s*:\s*$', stripped, re.IGNORECASE):
                 for j in range(i + 1, min(i + 4, len(lines))):
                     candidate = lines[j].strip()
-                    if len(candidate) > 2:
+                    if len(candidate) > 2 and not re.match(
+                        r'^(invoice|date|currency|payment|to|bill|description)',
+                        candidate, re.IGNORECASE
+                    ):
                         seller = candidate[:80]
                         s_conf = 0.85
                         break
                 break
-            m = re.match(r'from\s*:\s*([A-Za-z].+)', line.strip(), re.IGNORECASE)
+            # Label + name on same line: "FROM: Company Name"
+            m = re.match(r'from\s*:\s*([A-Za-z].+)', stripped, re.IGNORECASE)
             if m:
                 seller = m.group(1).strip()[:80]
                 s_conf = 0.85
@@ -363,34 +402,55 @@ def extract_party_names(text: str) -> Tuple[str, str, float, float]:
 
     if not buyer:
         for i, line in enumerate(lines):
-            if re.match(r'(?:bill\s+to|(?<!\w)to)\s*:\s*$', line.strip(), re.IGNORECASE):
+            stripped = line.strip()
+            if re.match(
+                r'(?:bill\s+to|ship\s+to|(?<!\w)to)\s*:\s*$',
+                stripped, re.IGNORECASE
+            ):
                 for j in range(i + 1, min(i + 4, len(lines))):
                     candidate = lines[j].strip()
-                    if len(candidate) > 2:
-                        buyer = candidate[:80]
+                    if len(candidate) > 2 and not re.match(
+                        r'^(invoice|date|currency|payment|from|description)',
+                        candidate, re.IGNORECASE
+                    ):
+                        buyer  = candidate[:80]
                         b_conf = 0.85
                         break
                 break
-            m = re.match(r'(?:bill\s+to|(?<!\w)to)\s*:\s*([A-Za-z].+)',
-                         line.strip(), re.IGNORECASE)
+            m = re.match(
+                r'(?:bill\s+to|ship\s+to|(?<!\w)to)\s*:\s*([A-Za-z].+)',
+                stripped, re.IGNORECASE
+            )
             if m:
-                buyer = m.group(1).strip()[:80]
+                buyer  = m.group(1).strip()[:80]
                 b_conf = 0.85
                 break
 
-    # ── Strategy 3: company header at top of document ──
-    # "LOPEZ, LOWERY AND COFFEY" appears as first line before invoice fields
+    # ── Strategy 3: last resort ──
+    skip_re = re.compile(
+        r'^(invoice|date|currency|payment|from|to|bill|ship|'
+        r'description|qty|unit|tax|discount|total|subtotal)',
+        re.IGNORECASE
+    )
     if not seller:
         for line in lines:
             candidate = line.strip()
             if (len(candidate) > 3
                     and re.search(r'[A-Za-z]{3,}', candidate)
-                    and not re.match(
-                        r'^(invoice|date|currency|payment|from|to|bill|'
-                        r'description|qty|unit|tax|discount|total|subtotal)',
-                        candidate, re.IGNORECASE)):
+                    and not skip_re.match(candidate)):
                 seller = candidate[:80]
-                s_conf = 0.5
+                s_conf = 0.50
+                break
+
+    if not buyer:
+        for line in lines:
+            candidate = line.strip()
+            if (len(candidate) > 3
+                    and candidate != seller
+                    and re.search(r'[A-Za-z]{3,}', candidate)
+                    and not skip_re.match(candidate)):
+                buyer  = candidate[:80]
+                b_conf = 0.30
                 break
 
     return seller, buyer, s_conf, b_conf
@@ -440,24 +500,21 @@ def parse_table_rows(table: List[List], col_map: Dict[str, int]) -> List[LineIte
         if not desc or desc.lower() in ("description", "item", "service"):
             continue
 
-        qty_raw = get_col("quantity")
-        up_raw = get_col("unit_price")
-        disc_raw = get_col("discount")
-        tax_raw = get_col("tax")
+        qty_raw   = get_col("quantity")
+        up_raw    = get_col("unit_price")
+        disc_raw  = get_col("discount")
+        tax_raw   = get_col("tax")
         total_raw = get_col("total")
 
-        qty = clean_amount(str(qty_raw)) if qty_raw else 1.0
-        unit_price = clean_amount(str(up_raw)) if up_raw else None
-        discount_amt = clean_amount(str(disc_raw)) if disc_raw else 0.0
-        tax_amt = clean_amount(str(tax_raw)) if tax_raw else 0.0
-        line_total = clean_amount(str(total_raw)) if total_raw else None
+        qty          = clean_amount(str(qty_raw))   if qty_raw   else 1.0
+        unit_price   = clean_amount(str(up_raw))    if up_raw    else None
+        discount_amt = clean_amount(str(disc_raw))  if disc_raw  else 0.0
+        tax_amt      = clean_amount(str(tax_raw))   if tax_raw   else 0.0
+        line_total   = clean_amount(str(total_raw)) if total_raw else None
 
-        if qty is None:
-            qty = 1.0
-        if discount_amt is None:
-            discount_amt = 0.0
-        if tax_amt is None:
-            tax_amt = 0.0
+        if qty          is None: qty          = 1.0
+        if discount_amt is None: discount_amt = 0.0
+        if tax_amt      is None: tax_amt      = 0.0
 
         # Infer missing values
         if unit_price and line_total is None:
@@ -492,7 +549,7 @@ def extract_tables_from_page(page) -> List[LineItem]:
         header_row = table[0]
         col_map = map_column_headers(header_row)
         if "description" not in col_map and "total" not in col_map:
-            continue  # Doesn't look like a line-item table
+            continue
         items.extend(parse_table_rows(table[1:], col_map))
 
     return items
@@ -504,37 +561,34 @@ def extract_tables_from_page(page) -> List[LineItem]:
 
 def detect_invoice_boundaries(pages_text: List[str]) -> List[Tuple[int, int]]:
     """
-    Given per-page text, return list of (page_start, page_end) for each invoice.
-    Uses heuristics: invoice signal density + break signals between invoices.
+    Return list of (page_start, page_end) tuples, one per detected invoice.
+    Uses invoice signal density scoring + break signal heuristics.
     """
     n = len(pages_text)
     if n == 0:
         return []
 
-    # Score each page
-    scores = [score_page_as_invoice(t) for t in pages_text]
-
-    # Find invoice start pages: pages with high score that follow a low-score page
-    # or are the first page
+    scores     = [score_page_as_invoice(t) for t in pages_text]
     boundaries = []
     in_invoice = False
-    inv_start = -1
+    inv_start  = -1
 
     for i, score in enumerate(scores):
         if score >= 0.3:
             if not in_invoice:
                 in_invoice = True
-                inv_start = i
+                inv_start  = i
             else:
-                # Check if this page starts a NEW invoice (has invoice header signals)
-                text = pages_text[i].lower()
+                text        = pages_text[i].lower()
                 break_count = sum(
                     len(re.findall(pat, text, re.IGNORECASE))
                     for pat in INVOICE_BREAK_SIGNALS
                 )
                 prev_text = pages_text[i - 1].lower() if i > 0 else ""
-                # If prev page had "total" (end of invoice) and this has header signals
-                had_total = any(lbl in prev_text for lbl in ["total amount", "amount due", "grand total"])
+                had_total = any(
+                    lbl in prev_text
+                    for lbl in ["total amount", "amount due", "grand total"]
+                )
                 if break_count >= 2 and (had_total or i == inv_start + 1):
                     boundaries.append((inv_start, i - 1))
                     inv_start = i
@@ -546,7 +600,7 @@ def detect_invoice_boundaries(pages_text: List[str]) -> List[Tuple[int, int]]:
     if in_invoice:
         boundaries.append((inv_start, n - 1))
 
-    # If no boundaries found but pages exist with some invoice signal, treat all as one
+    # Fallback: no boundaries found but some invoice signal exists
     if not boundaries and any(s > 0 for s in scores):
         best = max(range(n), key=lambda i: scores[i])
         if scores[best] >= 0.2:
@@ -567,67 +621,87 @@ def extract_invoice_from_pages(
     inv_idx: int,
 ) -> ExtractedInvoice:
     """Extract a single invoice spanning pages [page_start, page_end]."""
-    inv = ExtractedInvoice()
+    inv            = ExtractedInvoice()
     inv.invoice_id = f"{doc_id}_inv{inv_idx}"
     inv.page_start = page_start
-    inv.page_end = page_end
+    inv.page_end   = page_end
 
-    all_text = ""
+    all_text  = ""
     all_items: List[LineItem] = []
 
     try:
         with pdfplumber.open(pdf_path) as pdf:
             for pi in range(page_start, min(page_end + 1, len(pdf.pages))):
-                page = pdf.pages[pi]
-                text = page.extract_text() or ""
+                page      = pdf.pages[pi]
+                text      = page.extract_text() or ""
                 all_text += text + "\n"
-                items = extract_tables_from_page(page)
+                items     = extract_tables_from_page(page)
                 all_items.extend(items)
     except Exception as e:
-        logger.warning(f"pdfplumber error on {pdf_path} pages {page_start}-{page_end}: {e}")
+        logger.warning(
+            f"pdfplumber error on {pdf_path} pages {page_start}-{page_end}: {e}"
+        )
 
-    inv.raw_text = all_text
+    inv.raw_text   = all_text
     inv.line_items = all_items
 
     # ── Field extraction ──
     conf = {}
 
-    inv.invoice_number, conf["invoice_number"] = extract_invoice_number(all_text)
-    inv.issue_date, conf["issue_date"] = extract_date(all_text)
-    inv.currency, conf["currency"] = detect_currency(all_text)
-    inv.payment_terms_days, conf["payment_terms"] = extract_payment_terms(all_text)
+    inv.invoice_number,   conf["invoice_number"]  = extract_invoice_number(all_text)
+    inv.issue_date,       conf["issue_date"]       = extract_date(all_text)
+    inv.currency,         conf["currency"]         = detect_currency(all_text)
+    inv.payment_terms_days, conf["payment_terms"]  = extract_payment_terms(all_text)
 
     seller, buyer, sc, bc = extract_party_names(all_text)
-    inv.seller_name = seller
-    inv.buyer_name = buyer
+    inv.seller_name    = seller
+    inv.buyer_name     = buyer
     conf["seller_name"] = sc
-    conf["buyer_name"] = bc
+    conf["buyer_name"]  = bc
 
-    # Amount extraction
-    sub = extract_amounts_near_label(all_text, SUBTOTAL_LABELS)
-    tax = extract_amounts_near_label(all_text, TAX_LABELS)
-    disc = extract_amounts_near_label(all_text, DISCOUNT_LABELS)
+    # Amount extraction via regex labels
+    sub   = extract_amounts_near_label(all_text, SUBTOTAL_LABELS)
+    tax   = extract_amounts_near_label(all_text, TAX_LABELS)
+    disc  = extract_amounts_near_label(all_text, DISCOUNT_LABELS)
     total = extract_amounts_near_label(all_text, TOTAL_LABELS)
+    
+    if any(v is None for v in [sub, tax, disc, total]):
+        try:
+            with pdfplumber.open(pdf_path) as pdf:
+                for pi in range(page_start, min(page_end + 1, len(pdf.pages))):
+                    spatial = extract_amounts_spatial(pdf.pages[pi])
+                    if sub   is None and spatial["subtotal"]  is not None:
+                        sub   = spatial["subtotal"]
+                    if tax   is None and spatial["tax"]       is not None:
+                        tax   = spatial["tax"]
+                    if disc  is None and spatial["discount"]  is not None:
+                        disc  = spatial["discount"]
+                    if total is None and spatial["total"]     is not None:
+                        total = spatial["total"]
+        except Exception:
+            pass
 
-    # Fallback: compute from line items
-    if all_items and sub is None:
-        sub = round(sum(i.quantity * i.unit_price for i in all_items), 2)
+    # Fallback: compute from line items when regex finds nothing
+    if all_items and sub  is None:
+        sub  = round(sum(i.quantity * i.unit_price for i in all_items), 2)
     if all_items and disc is None:
-        disc = round(sum(i.discount_amount for i in all_items), 2)
-    if all_items and tax is None:
-        tax = round(sum(i.tax_amount for i in all_items), 2)
+        disc = round(sum(i.discount_amount         for i in all_items), 2)
+    if all_items and tax  is None:
+        tax  = round(sum(i.tax_amount              for i in all_items), 2)
 
-    inv.subtotal = sub or 0.0
-    inv.tax_amount = tax or 0.0
-    inv.discount_amount = disc or 0.0
-    inv.total_amount = total or 0.0
+    inv.subtotal        = sub   or 0.0
+    inv.tax_amount      = tax   or 0.0
+    inv.discount_amount = disc  or 0.0
+    inv.total_amount    = total or 0.0
 
-    # Infer total if missing
+    # Infer total if not found in text
     if inv.total_amount == 0.0 and inv.subtotal > 0:
-        inv.total_amount = round(inv.subtotal - inv.discount_amount + inv.tax_amount, 2)
+        inv.total_amount = round(
+            inv.subtotal - inv.discount_amount + inv.tax_amount, 2
+        )
 
-    conf["subtotal"] = 0.7 if sub else 0.3
-    conf["tax_amount"] = 0.7 if tax else 0.3
+    conf["subtotal"]     = 0.7 if sub   else 0.3
+    conf["tax_amount"]   = 0.7 if tax   else 0.3
     conf["total_amount"] = 0.8 if total else 0.4
 
     inv.confidence_scores = conf
@@ -638,7 +712,7 @@ def extract_invoice_from_pages(
 # Validation
 # ─────────────────────────────────────────────
 
-TOLERANCE = 0.05  # 5% tolerance for amount mismatches
+TOLERANCE = 0.05  # 5% relative-error tolerance for all amount checks
 
 
 def validate_invoice(inv: ExtractedInvoice) -> List[str]:
@@ -651,9 +725,9 @@ def validate_invoice(inv: ExtractedInvoice) -> List[str]:
         errors.append("missing_line_items")
 
     if inv.subtotal > 0 and inv.line_items:
-        expected_sub = round(sum(
-            i.quantity * i.unit_price for i in inv.line_items
-        ), 2)
+        expected_sub = round(
+            sum(i.quantity * i.unit_price for i in inv.line_items), 2
+        )
         if abs(expected_sub - inv.subtotal) / max(inv.subtotal, 1) > TOLERANCE:
             errors.append("subtotal_mismatch")
 
@@ -668,7 +742,9 @@ def validate_invoice(inv: ExtractedInvoice) -> List[str]:
             errors.append("discount_mismatch")
 
     if inv.total_amount > 0 and inv.subtotal > 0:
-        expected_total = round(inv.subtotal - inv.discount_amount + inv.tax_amount, 2)
+        expected_total = round(
+            inv.subtotal - inv.discount_amount + inv.tax_amount, 2
+        )
         if abs(expected_total - inv.total_amount) / max(inv.total_amount, 1) > TOLERANCE:
             errors.append("total_mismatch")
 
@@ -676,7 +752,7 @@ def validate_invoice(inv: ExtractedInvoice) -> List[str]:
 
 
 def detect_duplicates(invoices: List[ExtractedInvoice]) -> bool:
-    """Return True if any two invoices appear to be duplicates."""
+    """Return True if any two invoices share the same invoice number."""
     if len(invoices) < 2:
         return False
     numbers = [inv.invoice_number for inv in invoices if inv.invoice_number]
@@ -684,9 +760,9 @@ def detect_duplicates(invoices: List[ExtractedInvoice]) -> bool:
 
 
 def detect_non_invoice_pages(pdf_path: str, pages_text: List[str]) -> bool:
-    """Return True if any page is clearly non-invoice."""
+    """Return True if any page is clearly non-invoice content."""
     for t in pages_text:
-        score = score_page_as_invoice(t)
+        score     = score_page_as_invoice(t)
         non_score = sum(1 for s in NON_INVOICE_SIGNALS if s in t.lower())
         if score < 0.15 and non_score > 0:
             return True
@@ -726,10 +802,9 @@ def process_document(pdf_path: str, doc_id: str = None) -> DocumentResult:
     if doc_id is None:
         doc_id = Path(pdf_path).stem
 
-    notes = []
+    notes      = []
     pages_text = []
 
-    # Read all pages
     try:
         with pdfplumber.open(pdf_path) as pdf:
             for page in pdf.pages:
@@ -754,24 +829,21 @@ def process_document(pdf_path: str, doc_id: str = None) -> DocumentResult:
             processing_notes=["Empty document"]
         )
 
-    # Page scoring
     page_scores = [score_page_as_invoice(t) for t in pages_text]
+    boundaries  = detect_invoice_boundaries(pages_text)
+    notes.append(
+        f"Detected {len(boundaries)} invoice boundary(ies) "
+        f"across {len(pages_text)} page(s)"
+    )
 
-    # Detect invoice boundaries
-    boundaries = detect_invoice_boundaries(pages_text)
-    notes.append(f"Detected {len(boundaries)} invoice boundary(ies) across {len(pages_text)} page(s)")
-
-    # Extract each invoice
     invoices: List[ExtractedInvoice] = []
     for idx, (ps, pe) in enumerate(boundaries):
-        inv = extract_invoice_from_pages(pdf_path, ps, pe, doc_id, idx + 1)
-        errors = validate_invoice(inv)
-        inv.validation_errors = errors
+        inv                   = extract_invoice_from_pages(pdf_path, ps, pe, doc_id, idx + 1)
+        inv.validation_errors = validate_invoice(inv)
         invoices.append(inv)
 
-    # Document-level checks
     has_non_invoice = detect_non_invoice_pages(pdf_path, pages_text)
-    has_duplicates = detect_duplicates(invoices)
+    has_duplicates  = detect_duplicates(invoices)
 
     if has_duplicates:
         for inv in invoices:
@@ -794,33 +866,89 @@ def process_document(pdf_path: str, doc_id: str = None) -> DocumentResult:
         invoices=invoices,
         processing_notes=notes,
     )
+    
+def extract_amounts_spatial(page) -> Dict[str, Optional[float]]:
+    """
+    Use pdfplumber word bounding boxes to find amounts near labels.
+    Handles two-column layouts where label and amount are on the same
+    vertical band but separated horizontally.
+    Returns dict with keys: subtotal, tax, discount, total
+    """
+    results = {"subtotal": None, "tax": None, "discount": None, "total": None}
+
+    label_map = {
+        "subtotal": SUBTOTAL_LABELS,
+        "tax":      TAX_LABELS,
+        "discount": DISCOUNT_LABELS,
+        "total":    TOTAL_LABELS,
+    }
+
+    try:
+        words = page.extract_words()
+    except Exception:
+        return results
+
+    if not words:
+        return results
+
+    # Build list of (text, x0, y0, x1, y1) for all words
+    word_list = [(w["text"], w["x0"], w["top"], w["x1"], w["bottom"]) for w in words]
+
+    for field, patterns in label_map.items():
+        for txt, x0, y0, x1, y1 in word_list:
+            # Check if this word or nearby words form a label
+            label_found = any(
+                re.search(pat, txt, re.IGNORECASE) for pat in patterns
+            )
+            if not label_found:
+                continue
+
+            # Look for a numeric amount to the RIGHT of this label
+            # on the same horizontal band (within 10 points vertically)
+            candidates = []
+            for other_txt, ox0, oy0, ox1, oy1 in word_list:
+                if ox0 <= x0:          # must be to the right
+                    continue
+                if abs(oy0 - y0) > 10: # must be on same line
+                    continue
+                val = clean_amount(other_txt)
+                if val is not None and val > 0:
+                    candidates.append((ox0, val))
+
+            if candidates:
+                # Take the rightmost amount on the same line
+                candidates.sort(key=lambda c: c[0])
+                results[field] = candidates[-1][1]
+                break
+
+    return results
 
 
 def result_to_dict(result: DocumentResult) -> dict:
     """Serialize DocumentResult to annotation-compatible dict."""
     def inv_to_dict(inv: ExtractedInvoice) -> dict:
         return {
-            "invoice_id": inv.invoice_id,
-            "invoice_number": inv.invoice_number,
-            "seller_name": inv.seller_name,
-            "buyer_name": inv.buyer_name,
-            "issue_date": inv.issue_date,
-            "currency": inv.currency,
-            "subtotal": inv.subtotal,
-            "tax_amount": inv.tax_amount,
-            "discount_amount": inv.discount_amount,
-            "total_amount": inv.total_amount,
+            "invoice_id":         inv.invoice_id,
+            "invoice_number":     inv.invoice_number,
+            "seller_name":        inv.seller_name,
+            "buyer_name":         inv.buyer_name,
+            "issue_date":         inv.issue_date,
+            "currency":           inv.currency,
+            "subtotal":           inv.subtotal,
+            "tax_amount":         inv.tax_amount,
+            "discount_amount":    inv.discount_amount,
+            "total_amount":       inv.total_amount,
             "payment_terms_days": inv.payment_terms_days,
-            "page_start": inv.page_start,
-            "page_end": inv.page_end,
+            "page_start":         inv.page_start,
+            "page_end":           inv.page_end,
             "line_items": [
                 {
-                    "description": item.description,
-                    "quantity": item.quantity,
-                    "unit_price": item.unit_price,
-                    "tax_amount": item.tax_amount,
+                    "description":     item.description,
+                    "quantity":        item.quantity,
+                    "unit_price":      item.unit_price,
+                    "tax_amount":      item.tax_amount,
                     "discount_amount": item.discount_amount,
-                    "line_total": item.line_total,
+                    "line_total":      item.line_total,
                 }
                 for item in inv.line_items
             ],
@@ -829,9 +957,9 @@ def result_to_dict(result: DocumentResult) -> dict:
         }
 
     return {
-        "document_id": result.document_id,
-        "document_type": result.document_type,
-        "invoice_count": result.invoice_count,
-        "invoices": [inv_to_dict(inv) for inv in result.invoices],
+        "document_id":      result.document_id,
+        "document_type":    result.document_type,
+        "invoice_count":    result.invoice_count,
+        "invoices":         [inv_to_dict(inv) for inv in result.invoices],
         "processing_notes": result.processing_notes,
     }
